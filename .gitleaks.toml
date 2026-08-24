@@ -1,0 +1,9 @@
+# Gitleaks configuration: use the built-in default ruleset.
+# Add project-specific allowlists below when needed, e.g.:
+#
+# [[allowlists]]
+# description = "test fixtures"
+# paths = ['''tests/fixtures/.*''']
+
+[extend]
+useDefault = true

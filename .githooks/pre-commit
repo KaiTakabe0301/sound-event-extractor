@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Block commits that contain secrets (API keys, tokens, private keys, ...).
+# Enabled via: git config core.hooksPath .githooks  (done by `mise run setup`)
+set -u
+
+if command -v gitleaks >/dev/null 2>&1; then
+  GITLEAKS=(gitleaks)
+elif command -v mise >/dev/null 2>&1; then
+  GITLEAKS=(mise x -- gitleaks)
+else
+  echo "pre-commit: gitleaks not found. Run 'mise install' first." >&2
+  exit 1
+fi
+
+"${GITLEAKS[@]}" git --pre-commit --staged --redact --verbose
+status=$?
+if [ $status -ne 0 ]; then
+  echo "" >&2
+  echo "pre-commit: possible secret detected; commit aborted." >&2
+  echo "If this is a false positive, add an allowlist entry to .gitleaks.toml." >&2
+fi
+exit $status

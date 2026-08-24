@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Tool caches
+.pytest_cache/
+.cache/
+
+# OS
+.DS_Store
+
+# Local env / secrets
+.env
+.env.*
+
+# Scratch media files
+*.wav

@@ -1,0 +1,27 @@
+[tools]
+python = "3.12"
+uv = "latest"
+gitleaks = "latest"
+
+[tasks.setup]
+description = "Install dependencies and enable the gitleaks pre-commit hook"
+run = [
+  "uv sync",
+  "git config core.hooksPath .githooks",
+]
+
+[tasks.cli]
+description = "Run the CLI (append args after --)"
+run = "uv run sound-event-extractor"
+
+[tasks.gui]
+description = "Launch the desktop GUI"
+run = "uv run sound-event-extractor-gui"
+
+[tasks.test]
+description = "Run unit tests"
+run = "uv run pytest -q"
+
+[tasks.scan]
+description = "Scan the full git history for leaked secrets"
+run = "gitleaks git --redact --verbose"
