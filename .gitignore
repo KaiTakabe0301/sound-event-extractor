@@ -17,5 +17,12 @@ build/
 .env
 .env.*
 
-# Scratch media files
+# Media files (test inputs/outputs; keep large binaries out of git)
 *.wav
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4a
+*.mp3
