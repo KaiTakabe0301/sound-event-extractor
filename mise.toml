@@ -22,6 +22,10 @@ run = "uv run sound-event-extractor-gui"
 description = "Run unit tests"
 run = "uv run pytest -q"
 
+[tasks.build]
+description = "Build a standalone desktop app with PyInstaller (run on each target OS)"
+run = "uv run pyinstaller --noconfirm --clean --windowed --name SoundEventExtractor --specpath build --collect-all tensorflow --collect-all tensorflow_hub --collect-all tf_keras --collect-all imageio_ffmpeg packaging/entry_gui.py"
+
 [tasks.scan]
 description = "Scan the full git history for leaked secrets"
 run = "gitleaks git --redact --verbose"

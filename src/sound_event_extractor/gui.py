@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 
 import numpy as np
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -436,10 +437,32 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"保存しました: {path}")
 
 
+def _run_smoke_test(app: QApplication) -> int:
+    """Verify a frozen bundle: Qt is up, ffmpeg and TensorFlow are included."""
+    import os
+
+    from .audio import find_ffmpeg
+
+    try:
+        assert os.path.exists(find_ffmpeg()), "bundled ffmpeg missing"
+        import tensorflow  # noqa: F401  # heavy import: proves the bundle is complete
+        import tensorflow_hub  # noqa: F401
+    except Exception as exc:
+        print(f"SMOKE NG: {exc}")
+        return 1
+    QTimer.singleShot(500, app.quit)
+    app.exec()
+    print("SMOKE OK")
+    return 0
+
+
 def main() -> None:
-    app = QApplication([])
+    smoke = "--smoke-test" in sys.argv
+    app = QApplication([a for a in sys.argv if a != "--smoke-test"])
     window = MainWindow()
     window.show()
+    if smoke:
+        raise SystemExit(_run_smoke_test(app))
     raise SystemExit(app.exec())
 
 
