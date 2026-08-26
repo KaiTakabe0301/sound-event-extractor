@@ -7,7 +7,7 @@ import os
 import sys
 
 from .audio import SAMPLE_RATE, extract_waveform
-from .detect import detect_segments, format_timestamp, write_csv
+from .detect import detect_segments, format_timestamp, write_csv, write_debug_scores
 from .labels import match_classes
 
 
@@ -23,6 +23,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--merge-gap", type=float, default=1.0, help="この秒数以内の区間を結合(既定: 1.0)")
     parser.add_argument("--min-duration", type=float, default=0.5, help="この秒数未満の区間を除外(既定: 0.5)")
     parser.add_argument("--list-labels", action="store_true", help="AudioSet クラス名の一覧を表示して終了")
+    parser.add_argument(
+        "--debug-scores",
+        nargs="?",
+        const="",
+        metavar="PATH",
+        help="フレームごとのスコア内訳 CSV を出力(パス省略時: <動画名>_scores.csv)",
+    )
     return parser
 
 
@@ -78,6 +85,11 @@ def main() -> None:
 
     output = args.output or f"{os.path.splitext(args.video)[0]}_events.csv"
     write_csv(output, args.label, segments)
+
+    if args.debug_scores is not None:
+        debug_path = args.debug_scores or f"{os.path.splitext(args.video)[0]}_scores.csv"
+        write_debug_scores(debug_path, model.class_names, scores, indices, args.label)
+        print(f"スコア内訳 CSV: {debug_path}")
 
     print(f"検出区間: {len(segments)} 件 -> {output}")
     for seg in segments:

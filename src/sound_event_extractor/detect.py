@@ -41,6 +41,13 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:d}:{minutes:02d}:{rest / 1000:06.3f}"
 
 
+def combined_frame_scores(scores: np.ndarray, class_indices: list[int]) -> np.ndarray:
+    """Max score over the selected classes for each frame."""
+    if not class_indices or scores.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    return scores[:, class_indices].max(axis=1)
+
+
 def detect_segments(
     scores: np.ndarray,
     class_indices: list[int],
@@ -53,9 +60,9 @@ def detect_segments(
     Frame i covers [i * hop, i * hop + win] seconds; the per-frame score is
     the max over the selected classes.
     """
-    if not class_indices or scores.size == 0:
+    frame_scores = combined_frame_scores(scores, class_indices)
+    if frame_scores.size == 0:
         return []
-    frame_scores = scores[:, class_indices].max(axis=1)
     active = frame_scores >= threshold
 
     # Runs of consecutive active frames as (first, last) inclusive indices.
@@ -106,3 +113,34 @@ def write_csv(path: str, label: str, segments: list[Segment]) -> None:
                     f"{seg.mean_score:.3f}",
                 ]
             )
+
+
+DEBUG_TOP_N = 5
+
+
+def write_debug_scores(
+    path: str,
+    class_names: list[str],
+    scores: np.ndarray,
+    class_indices: list[int],
+    label: str,
+) -> None:
+    """Write per-frame diagnostics: matched-class max plus overall top-N classes."""
+    matched = combined_frame_scores(scores, class_indices)
+    top_n = min(DEBUG_TOP_N, len(class_names))
+    header = ["frame_time_seconds", "frame_time", f"score[{label}]"]
+    for rank in range(1, top_n + 1):
+        header += [f"top{rank}_class", f"top{rank}_score"]
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(header)
+        for i, frame in enumerate(scores):
+            t = i * FRAME_HOP_SEC
+            row = [
+                f"{t:.2f}",
+                format_timestamp(t),
+                f"{matched[i]:.3f}" if matched.size else "",
+            ]
+            for j in np.argsort(frame)[::-1][:top_n]:
+                row += [class_names[j], f"{frame[j]:.3f}"]
+            writer.writerow(row)
