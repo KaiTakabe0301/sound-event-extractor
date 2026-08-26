@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
         row.addWidget(QLabel("しきい値:"))
         self.threshold_spin = QDoubleSpinBox()
         self.threshold_spin.setRange(0.01, 0.95)
-        self.threshold_spin.setSingleStep(0.05)
+        self.threshold_spin.setSingleStep(0.01)
         self.threshold_spin.setValue(0.05)
         row.addWidget(self.threshold_spin)
         self.normalize_check = QCheckBox("小さい音を増幅")
