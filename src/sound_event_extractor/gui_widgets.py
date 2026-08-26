@@ -66,6 +66,12 @@ class SpectrogramView(TimeStrip):
         )
         self.set_duration(duration)
 
+    def clear(self) -> None:
+        self._image = None
+        self._image_bytes = None
+        self._position = 0.0
+        self.update()
+
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), BG_COLOR)
@@ -101,6 +107,27 @@ class ScoreTimeline(TimeStrip):
         self._polygon_key = None
         self.set_duration(duration)
 
+    def clear(self) -> None:
+        self._scores = None
+        self._polygon_key = None
+        self._position = 0.0
+        self.update()
+
+    def begin_stream(self, hop_sec: float, threshold: float, duration: float) -> None:
+        """Prepare to receive incremental score chunks during playback."""
+        self._scores = np.zeros(0, dtype=np.float32)
+        self._hop = hop_sec
+        self._threshold = threshold
+        self._polygon_key = None
+        self.set_duration(duration)
+
+    def append_scores(self, chunk: np.ndarray) -> None:
+        if self._scores is None:
+            self._scores = np.zeros(0, dtype=np.float32)
+        self._scores = np.concatenate([self._scores, chunk])
+        self._polygon_key = None
+        self.update()
+
     def score_at(self, seconds: float) -> float | None:
         if self._scores is None or self._scores.size == 0 or self._hop <= 0:
             return None
@@ -132,6 +159,11 @@ class ScoreTimeline(TimeStrip):
                 self._polygon_key = (width, height)
             painter.setPen(QPen(SCORE_COLOR, 1))
             painter.drawPolyline(self._polygon)
+            frontier = self._scores.size * self._hop
+            if frontier < self._duration - self._hop:  # streaming still in progress
+                x = int(frontier / self._duration * width)
+                painter.setPen(QPen(QColor("#666666"), 1))
+                painter.drawLine(x, 0, x, height)
             painter.setPen(TEXT_COLOR)
             painter.drawText(4, 12, f"しきい値 {self._threshold:.2f}")
         self._draw_playhead(painter)

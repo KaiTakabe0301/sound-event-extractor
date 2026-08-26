@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 
+import numpy as np
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-from .audio import extract_waveform
+from .audio import SAMPLE_RATE, extract_waveform
 from .detect import combined_frame_scores, detect_segments, format_timestamp, write_csv
 from .gui_widgets import ScoreTimeline, SpectrogramView
 from .labels import SUGGESTED_LABELS, match_classes
@@ -36,6 +37,7 @@ from .spectrogram import compute_spectrogram
 
 MEDIA_FILTER = "動画/音声 (*.mp4 *.mov *.mkv *.avi *.webm *.m4a *.mp3 *.wav);;すべて (*)"
 TABLE_HEADERS = ["開始", "終了", "長さ(秒)", "最大スコア", "平均スコア"]
+STREAM_FRAMES = 25  # ~12 s per inference chunk: quick first feedback during playback
 
 
 class AnalysisWorker(QObject):
@@ -44,6 +46,9 @@ class AnalysisWorker(QObject):
     status = Signal(str)
     progress = Signal(float)
     failed = Signal(str)
+    spectrogram_ready = Signal(object)  # (image, duration), right after extraction
+    stream_started = Signal(object)  # {"threshold", "duration"}
+    scores_partial = Signal(object)  # 1-D matched-score chunk on the 0.48 s grid
     finished = Signal(object)  # dict with segments/frame_scores/spec_image/...
 
     _model = None  # cached across runs
@@ -68,8 +73,18 @@ class AnalysisWorker(QObject):
             self.status.emit("音声を抽出中...")
             waveform = extract_waveform(self._path)
             spec_image, duration = compute_spectrogram(waveform)
+            self.spectrogram_ready.emit((spec_image, duration))
+            self.stream_started.emit({"threshold": self._threshold, "duration": duration})
             self.status.emit(f"解析中... (対象クラス {len(indices)} 件)")
-            scores = model.scores(waveform, progress=self.progress.emit)
+            parts: list[np.ndarray] = []
+            done_samples = 0
+            chunk_samples = STREAM_FRAMES * FRAME_HOP_SEC * SAMPLE_RATE
+            for chunk_scores in model.iter_scores(waveform, frames_per_chunk=STREAM_FRAMES):
+                parts.append(chunk_scores)
+                self.scores_partial.emit(combined_frame_scores(chunk_scores, indices))
+                done_samples += chunk_samples
+                self.progress.emit(min(done_samples / waveform.size, 1.0))
+            scores = np.concatenate(parts, axis=0)
             self.finished.emit(
                 {
                     "segments": detect_segments(scores, indices, threshold=self._threshold),
@@ -92,6 +107,8 @@ class MainWindow(QMainWindow):
         self.segments = []
         self.current_label = ""
         self._worker: AnalysisWorker | None = None
+        self._analysis_running = False
+        self._analysis_done = False
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
@@ -137,7 +154,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setMaximumWidth(140)
         row.addWidget(self.progress_bar)
-        self.status_label = QLabel("動画とラベルを選んで「解析開始」を押してください")
+        self.status_label = QLabel("動画とラベルを選び、再生または「解析開始」を押してください")
         row.addWidget(self.status_label, stretch=1)
         layout.addLayout(row)
 
@@ -187,8 +204,10 @@ class MainWindow(QMainWindow):
     def _toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
-        else:
-            self.player.play()
+            return
+        if not self._analysis_running and not self._analysis_done:
+            self._start_analysis(auto=True)  # live-fill the strips during playback
+        self.player.play()
 
     def _on_playback_state(self, state) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
@@ -226,13 +245,22 @@ class MainWindow(QMainWindow):
         if path:
             self.path_edit.setText(path)
             self._load_media(path)
-            self.status_label.setText("「解析開始」で検出、再生ボタンで内容を確認できます")
+            self._analysis_done = False
+            self.segments = []
+            self.table.setRowCount(0)
+            self.save_btn.setEnabled(False)
+            self.spectrogram.clear()
+            self.timeline.clear()
+            self.status_label.setText("再生すると自動で解析が始まります(「解析開始」でも可)")
 
-    def _start_analysis(self) -> None:
+    def _start_analysis(self, auto: bool = False) -> None:
+        if self._analysis_running:
+            return
         path = self.path_edit.text().strip()
         label = self.label_combo.currentText().strip()
         if not path or not label:
-            QMessageBox.warning(self, "入力不足", "動画ファイルとラベルを指定してください")
+            if not auto:
+                QMessageBox.warning(self, "入力不足", "動画ファイルとラベルを指定してください")
             return
         if self.player.source().isEmpty():
             self._load_media(path)
@@ -240,21 +268,37 @@ class MainWindow(QMainWindow):
         self.save_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.table.setRowCount(0)
+        self.timeline.clear()
         self.current_label = label
+        self._analysis_running = True
+        self._analysis_done = False
         worker = AnalysisWorker(path, label, self.threshold_spin.value())
         worker.status.connect(self.status_label.setText)
         worker.progress.connect(lambda ratio: self.progress_bar.setValue(int(ratio * 100)))
+        worker.spectrogram_ready.connect(self._on_spectrogram_ready)
+        worker.stream_started.connect(self._on_stream_started)
+        worker.scores_partial.connect(self.timeline.append_scores)
         worker.failed.connect(self._on_failed)
         worker.finished.connect(self._on_finished)
         self._worker = worker  # keep a reference while the thread runs
         threading.Thread(target=worker.run, daemon=True).start()
 
     def _on_failed(self, message: str) -> None:
+        self._analysis_running = False
         self.run_btn.setEnabled(True)
         self.status_label.setText("エラーが発生しました")
         QMessageBox.critical(self, "エラー", message)
 
+    def _on_spectrogram_ready(self, payload) -> None:
+        image, duration = payload
+        self.spectrogram.set_data(image, duration)
+
+    def _on_stream_started(self, info: dict) -> None:
+        self.timeline.begin_stream(FRAME_HOP_SEC, info["threshold"], info["duration"])
+
     def _on_finished(self, result: dict) -> None:
+        self._analysis_running = False
+        self._analysis_done = True
         self.segments = result["segments"]
         self.spectrogram.set_data(result["spec_image"], result["duration"])
         self.timeline.set_data(

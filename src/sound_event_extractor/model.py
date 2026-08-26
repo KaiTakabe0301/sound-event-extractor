@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import numpy as np
 
@@ -44,20 +44,28 @@ class YamNet:
         with open(path, newline="", encoding="utf-8") as fh:
             return [row["display_name"] for row in csv.DictReader(fh)]
 
-    def scores(self, waveform: np.ndarray, progress: ProgressFn | None = None) -> np.ndarray:
-        """Return per-frame class scores of shape (n_frames, 521)."""
-        chunk_samples = _WIN + (FRAMES_PER_CHUNK - 1) * _HOP
-        advance = FRAMES_PER_CHUNK * _HOP
-        total = waveform.size
-        parts: list[np.ndarray] = []
+    def iter_scores(
+        self, waveform: np.ndarray, frames_per_chunk: int = FRAMES_PER_CHUNK
+    ) -> Iterator[np.ndarray]:
+        """Yield per-chunk score arrays; chunks tile the global 0.48 s frame grid."""
+        chunk_samples = _WIN + (frames_per_chunk - 1) * _HOP
+        advance = frames_per_chunk * _HOP
         pos = 0
-        while pos < total:
+        while pos < waveform.size:
             chunk = waveform[pos : pos + chunk_samples]
             if chunk.size < _WIN:
                 chunk = np.pad(chunk, (0, _WIN - chunk.size))
             chunk_scores, _, _ = self._model(chunk)
-            parts.append(chunk_scores.numpy())
             pos += advance
+            yield chunk_scores.numpy()
+
+    def scores(self, waveform: np.ndarray, progress: ProgressFn | None = None) -> np.ndarray:
+        """Return per-frame class scores of shape (n_frames, 521)."""
+        parts: list[np.ndarray] = []
+        pos = 0
+        for part in self.iter_scores(waveform):
+            parts.append(part)
+            pos += FRAMES_PER_CHUNK * _HOP
             if progress is not None:
-                progress(min(pos / total, 1.0))
+                progress(min(pos / waveform.size, 1.0))
         return np.concatenate(parts, axis=0)
