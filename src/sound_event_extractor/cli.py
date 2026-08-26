@@ -24,6 +24,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-duration", type=float, default=0.5, help="この秒数未満の区間を除外(既定: 0.5)")
     parser.add_argument("--list-labels", action="store_true", help="AudioSet クラス名の一覧を表示して終了")
     parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="音量を動的に正規化し、小さい音を増幅してから解析する(遠く・小音量の音の取りこぼし対策)",
+    )
+    parser.add_argument(
         "--debug-scores",
         nargs="?",
         const="",
@@ -64,8 +69,8 @@ def main() -> None:
     matched = ", ".join(model.class_names[i] for i in indices)
     print(f"対象クラス ({len(indices)} 件): {matched}")
 
-    print("音声を抽出中...", flush=True)
-    waveform = extract_waveform(args.video)
+    print("音声を抽出中..." + ("(音量正規化あり)" if args.normalize else ""), flush=True)
+    waveform = extract_waveform(args.video, normalize=args.normalize)
     duration = waveform.size / SAMPLE_RATE
     print(f"音声長: {format_timestamp(duration)}")
 

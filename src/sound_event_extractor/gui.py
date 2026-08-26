@@ -10,6 +10,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -44,16 +45,18 @@ STREAM_FRAMES = 25  # ~12 s per inference chunk: quick first feedback during pla
 class ExtractWorker(QObject):
     """Decodes the audio track right after a file is loaded (no model needed)."""
 
-    done = Signal(object)  # waveform
+    done = Signal(object)  # (waveform, normalized: bool)
     failed = Signal(str)
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, normalize: bool) -> None:
         super().__init__()
         self._path = path
+        self._normalize = normalize
 
     def run(self) -> None:
         try:
-            self.done.emit(extract_waveform(self._path))
+            waveform = extract_waveform(self._path, normalize=self._normalize)
+            self.done.emit((waveform, self._normalize))
         except Exception as exc:
             self.failed.emit(f"音声抽出に失敗: {exc}")
 
@@ -73,13 +76,19 @@ class AnalysisWorker(QObject):
     _model = None  # cached across runs
 
     def __init__(
-        self, path: str, label: str, threshold: float, waveform: np.ndarray | None = None
+        self,
+        path: str,
+        label: str,
+        threshold: float,
+        waveform: np.ndarray | None = None,
+        normalize: bool = False,
     ) -> None:
         super().__init__()
         self._path = path
         self._label = label
         self._threshold = threshold
         self._waveform = waveform  # reuse the already-decoded audio when available
+        self._normalize = normalize
 
     def run(self) -> None:
         try:
@@ -95,8 +104,8 @@ class AnalysisWorker(QObject):
             waveform = self._waveform
             if waveform is None:
                 self.status.emit("音声を抽出中...")
-                waveform = extract_waveform(self._path)
-            self.waveform_ready.emit(waveform)
+                waveform = extract_waveform(self._path, normalize=self._normalize)
+            self.waveform_ready.emit((waveform, self._normalize))
             spec_image, duration = compute_spectrogram(waveform)
             self.spectrogram_ready.emit((spec_image, duration))
             self.stream_started.emit(
@@ -181,6 +190,13 @@ class MainWindow(QMainWindow):
         self.threshold_spin.setSingleStep(0.05)
         self.threshold_spin.setValue(0.30)
         row.addWidget(self.threshold_spin)
+        self.normalize_check = QCheckBox("小さい音を増幅")
+        self.normalize_check.setToolTip(
+            "音量を動的に正規化し、遠く・小音量の音を持ち上げてから解析します\n"
+            "(暗騒音も増幅されるため誤検出が増える場合はしきい値を上げてください)"
+        )
+        self.normalize_check.toggled.connect(self._on_normalize_toggled)
+        row.addWidget(self.normalize_check)
         self.run_btn = QPushButton("解析開始")
         self.run_btn.clicked.connect(self._start_analysis)
         row.addWidget(self.run_btn)
@@ -247,13 +263,26 @@ class MainWindow(QMainWindow):
         self.player.setSource(QUrl.fromLocalFile(path))
         self.play_btn.setEnabled(True)
         # decode the audio up front so the instant spectrum works without analysis
+        self._start_extraction(path)
+
+    def _start_extraction(self, path: str) -> None:
         self._waveform = None
         self.instant_spectrum.clear()
-        extractor = ExtractWorker(path)
+        extractor = ExtractWorker(path, self.normalize_check.isChecked())
         extractor.done.connect(self._on_waveform_ready)
         extractor.failed.connect(self.status_label.setText)
         self._extractor = extractor  # keep a reference while the thread runs
         threading.Thread(target=extractor.run, daemon=True).start()
+
+    def _on_normalize_toggled(self, _checked: bool) -> None:
+        path = self.path_edit.text().strip()
+        if not path:
+            return
+        self._analysis_done = False
+        self._start_extraction(path)
+        self.status_label.setText(
+            "音量増幅の設定を変更しました。再生または「解析開始」で再解析されます"
+        )
 
     def _toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -330,7 +359,13 @@ class MainWindow(QMainWindow):
         self.current_label = label
         self._analysis_running = True
         self._analysis_done = False
-        worker = AnalysisWorker(path, label, self.threshold_spin.value(), waveform=self._waveform)
+        worker = AnalysisWorker(
+            path,
+            label,
+            self.threshold_spin.value(),
+            waveform=self._waveform,
+            normalize=self.normalize_check.isChecked(),
+        )
         worker.status.connect(self.status_label.setText)
         worker.progress.connect(lambda ratio: self.progress_bar.setValue(int(ratio * 100)))
         worker.waveform_ready.connect(self._on_waveform_ready)
@@ -348,7 +383,10 @@ class MainWindow(QMainWindow):
         self.status_label.setText("エラーが発生しました")
         QMessageBox.critical(self, "エラー", message)
 
-    def _on_waveform_ready(self, waveform) -> None:
+    def _on_waveform_ready(self, payload) -> None:
+        waveform, normalized = payload
+        if normalized != self.normalize_check.isChecked():
+            return  # stale extraction from a previous setting
         self._waveform = waveform
         self.instant_spectrum.set_waveform(waveform)
 
