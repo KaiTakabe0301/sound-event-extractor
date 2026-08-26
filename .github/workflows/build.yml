@@ -1,0 +1,34 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync
+      - name: Run tests
+        run: uv run pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Build desktop app
+        run: >
+          uv run pyinstaller --noconfirm --clean --windowed
+          --name SoundEventExtractor --specpath build
+          --collect-all tensorflow --collect-all tensorflow_hub
+          --collect-all tf_keras --collect-all imageio_ffmpeg
+          packaging/entry_gui.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SoundEventExtractor-${{ matrix.os }}
+          path: dist/
