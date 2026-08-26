@@ -94,7 +94,7 @@ class ScoreTimeline(TimeStrip):
         super().__init__(100)
         self._scores: np.ndarray | None = None
         self._hop = 0.48
-        self._threshold = 0.3
+        self._threshold = 0.05
         self._polygon: QPolygon | None = None
         self._polygon_key: tuple[int, int] | None = None
 

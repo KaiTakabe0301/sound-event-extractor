@@ -51,7 +51,7 @@ def combined_frame_scores(scores: np.ndarray, class_indices: list[int]) -> np.nd
 def detect_segments(
     scores: np.ndarray,
     class_indices: list[int],
-    threshold: float = 0.3,
+    threshold: float = 0.05,
     merge_gap: float = 1.0,
     min_duration: float = 0.5,
 ) -> list[Segment]:

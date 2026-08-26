@@ -19,7 +19,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("video", nargs="?", help="入力動画/音声ファイル")
     parser.add_argument("--label", "-l", help="検出する音のラベル(例: 犬の鳴き声, dog)")
     parser.add_argument("--output", "-o", help="出力 CSV パス(既定: <動画名>_events.csv)")
-    parser.add_argument("--threshold", type=float, default=0.3, help="スコアしきい値 0〜1(既定: 0.3)")
+    parser.add_argument("--threshold", type=float, default=0.05, help="スコアしきい値 0〜1(既定: 0.05)")
     parser.add_argument("--merge-gap", type=float, default=1.0, help="この秒数以内の区間を結合(既定: 1.0)")
     parser.add_argument("--min-duration", type=float, default=0.5, help="この秒数未満の区間を除外(既定: 0.5)")
     parser.add_argument("--list-labels", action="store_true", help="AudioSet クラス名の一覧を表示して終了")

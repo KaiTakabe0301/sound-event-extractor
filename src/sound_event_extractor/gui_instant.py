@@ -103,7 +103,7 @@ class InstantScoreView(QWidget):
         self.setMinimumWidth(280)
         self._hop = 0.48
         self._label = ""
-        self._threshold = 0.3
+        self._threshold = 0.05
         self._combined: np.ndarray | None = None
         self._tops: list = []
         self._index = -1
