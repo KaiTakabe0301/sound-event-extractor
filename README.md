@@ -132,6 +132,42 @@ mise run scan
 
 誤検知は `.gitleaks.toml` の allowlist に追記して除外できます。
 
+## Windows 対応と配布用ビルド
+
+### Windows でソースから動かす
+
+コードは全てクロスプラットフォーム(Python / PySide6 / TensorFlow CPU /
+imageio-ffmpeg)なので、Windows でも動作します(macOS でのみ動作確認済み。
+Windows は未検証)。mise の Windows 対応は発展途上のため、Windows では
+[uv](https://docs.astral.sh/uv/) を直接使うのが簡単です:
+
+```powershell
+uv sync
+uv run sound-event-extractor-gui
+```
+
+Windows の TensorFlow は CPU 版のみですが、本ツールはもともと CPU 推論の
+ため問題ありません。
+
+### スタンドアロンアプリのビルド(PyInstaller)
+
+Python 環境なしで起動できる配布用アプリを生成します:
+
+```sh
+mise run build    # 生成物: dist/SoundEventExtractor(.app)
+```
+
+- **クロスビルドは不可**: Windows 用 .exe は Windows 上で、macOS 用 .app は
+  macOS 上でビルドする必要がある
+- GitHub にリポジトリを push すれば、GitHub Actions
+  (`.github/workflows/build.yml`)が Windows / macOS 両方の成果物を自動
+  ビルドする(`v*` タグの push、または手動実行)
+- TensorFlow を同梱するため生成物は大きい(1GB 超)
+- ビルド済みアプリも初回起動時の解析で YAMNet(約 20MB)をダウンロード
+  するため、初回のみネットワーク接続が必要
+- 動作確認: ビルド後に `dist/SoundEventExtractor/SoundEventExtractor
+  --smoke-test` で同梱物(Qt / ffmpeg / TensorFlow)を自己検査できる
+
 ## 開発
 
 ```sh
