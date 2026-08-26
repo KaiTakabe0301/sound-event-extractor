@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from sound_event_extractor.audio import SAMPLE_RATE
+from sound_event_extractor.gui_instant import InstantScoreView, InstantSpectrumView
 from sound_event_extractor.gui_widgets import ScoreTimeline, SpectrogramView
 
 
@@ -40,3 +42,30 @@ def test_clear_resets(app) -> None:
     spec.set_data(np.zeros((16, 8), dtype=np.uint8), 5.0)
     spec.clear()
     spec.grab()
+
+
+def test_instant_spectrum_peak_frequency(app) -> None:
+    view = InstantSpectrumView()
+    t = np.arange(SAMPLE_RATE) / SAMPLE_RATE
+    view.set_waveform((0.5 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32))
+    view.set_position(0.5)
+    assert view._peak_hz == pytest.approx(1000, abs=8)
+    view.grab()  # exercise the spectrum paint path
+    view.clear()
+    view.grab()  # placeholder paint path
+
+
+def test_instant_score_view_streaming(app) -> None:
+    view = InstantScoreView()
+    view.begin_stream(0.48, "犬の鳴き声", 0.3)
+    view.append(
+        np.array([0.2, 0.7], dtype=np.float32),
+        [[("Dog", 0.2), ("Speech", 0.1)], [("Bark", 0.7), ("Dog", 0.6)]],
+    )
+    view.set_position(0.5)  # frame 1
+    assert view._index == 1
+    view.grab()  # paint with data
+    view.set_position(5.0)  # beyond the analyzed frontier
+    view.grab()  # "not yet analyzed" paint path
+    view.clear()
+    assert view._index == -1
