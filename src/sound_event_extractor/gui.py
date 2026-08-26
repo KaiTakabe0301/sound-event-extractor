@@ -1,195 +1,296 @@
-"""Tkinter desktop GUI."""
+"""PySide6 desktop GUI: analysis, video playback, spectrogram, score timeline."""
 
 from __future__ import annotations
 
-import queue
 import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+
+from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSlider,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+from PySide6.QtCore import Qt
 
 from .audio import extract_waveform
-from .detect import Segment, detect_segments, format_timestamp, write_csv
+from .detect import combined_frame_scores, detect_segments, format_timestamp, write_csv
+from .gui_widgets import ScoreTimeline, SpectrogramView
 from .labels import SUGGESTED_LABELS, match_classes
+from .model import FRAME_HOP_SEC
+from .spectrogram import compute_spectrogram
 
-MEDIA_FILETYPES = [
-    ("動画/音声", "*.mp4 *.mov *.mkv *.avi *.webm *.m4a *.mp3 *.wav"),
-    ("すべてのファイル", "*.*"),
-]
+MEDIA_FILTER = "動画/音声 (*.mp4 *.mov *.mkv *.avi *.webm *.m4a *.mp3 *.wav);;すべて (*)"
+TABLE_HEADERS = ["開始", "終了", "長さ(秒)", "最大スコア", "平均スコア"]
 
 
-class App:
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        root.title("Sound Event Extractor")
-        root.geometry("760x500")
-        self.model = None  # loaded lazily in the worker thread
-        self.queue: queue.Queue = queue.Queue()
-        self.segments: list[Segment] = []
-        self.current_label = ""
-        self._build_widgets()
-        root.after(100, self._poll_queue)
+class AnalysisWorker(QObject):
+    """Runs extraction + inference on a plain thread; reports via signals."""
 
-    def _build_widgets(self) -> None:
-        frm = ttk.Frame(self.root, padding=10)
-        frm.pack(fill=tk.BOTH, expand=True)
+    status = Signal(str)
+    progress = Signal(float)
+    failed = Signal(str)
+    finished = Signal(object)  # dict with segments/frame_scores/spec_image/...
 
-        row = ttk.Frame(frm)
-        row.pack(fill=tk.X, pady=2)
-        ttk.Label(row, text="動画ファイル:").pack(side=tk.LEFT)
-        self.path_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.path_var).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=4
-        )
-        ttk.Button(row, text="参照...", command=self._browse).pack(side=tk.LEFT)
+    _model = None  # cached across runs
 
-        row = ttk.Frame(frm)
-        row.pack(fill=tk.X, pady=2)
-        ttk.Label(row, text="ラベル:").pack(side=tk.LEFT)
-        self.label_var = tk.StringVar(value=SUGGESTED_LABELS[0])
-        ttk.Combobox(
-            row, textvariable=self.label_var, values=SUGGESTED_LABELS, width=18
-        ).pack(side=tk.LEFT, padx=4)
-        ttk.Label(row, text="しきい値:").pack(side=tk.LEFT, padx=(12, 0))
-        self.threshold_var = tk.DoubleVar(value=0.3)
-        ttk.Scale(
-            row,
-            from_=0.05,
-            to=0.95,
-            variable=self.threshold_var,
-            command=self._on_threshold,
-            length=160,
-        ).pack(side=tk.LEFT, padx=4)
-        self.threshold_label = ttk.Label(row, text="0.30", width=5)
-        self.threshold_label.pack(side=tk.LEFT)
+    def __init__(self, path: str, label: str, threshold: float) -> None:
+        super().__init__()
+        self._path = path
+        self._label = label
+        self._threshold = threshold
 
-        row = ttk.Frame(frm)
-        row.pack(fill=tk.X, pady=4)
-        self.run_btn = ttk.Button(row, text="解析開始", command=self._start)
-        self.run_btn.pack(side=tk.LEFT)
-        self.save_btn = ttk.Button(
-            row, text="CSV 保存", command=self._save_csv, state=tk.DISABLED
-        )
-        self.save_btn.pack(side=tk.LEFT, padx=6)
-        self.status_var = tk.StringVar(value="動画とラベルを選んで「解析開始」を押してください")
-        ttk.Label(row, textvariable=self.status_var).pack(side=tk.LEFT, padx=8)
-
-        self.progress = ttk.Progressbar(frm, maximum=1.0)
-        self.progress.pack(fill=tk.X, pady=4)
-
-        columns = ("start", "end", "duration", "max", "mean")
-        headings = ["開始", "終了", "長さ(秒)", "最大スコア", "平均スコア"]
-        self.tree = ttk.Treeview(frm, columns=columns, show="headings")
-        for key, text in zip(columns, headings):
-            self.tree.heading(key, text=text)
-            self.tree.column(key, width=130, anchor=tk.CENTER)
-        self.tree.pack(fill=tk.BOTH, expand=True, pady=4)
-
-    def _on_threshold(self, _value: str) -> None:
-        self.threshold_label.config(text=f"{self.threshold_var.get():.2f}")
-
-    def _browse(self) -> None:
-        path = filedialog.askopenfilename(
-            title="動画ファイルを選択", filetypes=MEDIA_FILETYPES
-        )
-        if path:
-            self.path_var.set(path)
-
-    def _start(self) -> None:
-        path = self.path_var.get().strip()
-        label = self.label_var.get().strip()
-        if not path or not label:
-            messagebox.showwarning("入力不足", "動画ファイルとラベルを指定してください")
-            return
-        self.run_btn.config(state=tk.DISABLED)
-        self.save_btn.config(state=tk.DISABLED)
-        self.progress["value"] = 0.0
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self.current_label = label
-        threading.Thread(
-            target=self._worker,
-            args=(path, label, self.threshold_var.get()),
-            daemon=True,
-        ).start()
-
-    # --- worker thread ---
-
-    def _worker(self, path: str, label: str, threshold: float) -> None:
+    def run(self) -> None:
         try:
-            if self.model is None:
-                self.queue.put(("status", "モデル読み込み中(初回はダウンロードあり)..."))
+            if AnalysisWorker._model is None:
+                self.status.emit("モデル読み込み中(初回はダウンロードあり)...")
                 from .model import YamNet  # defer heavy tensorflow import
 
-                self.model = YamNet()
-            indices = match_classes(self.model.class_names, label)
+                AnalysisWorker._model = YamNet()
+            model = AnalysisWorker._model
+            indices = match_classes(model.class_names, self._label)
             if not indices:
-                raise RuntimeError(f"ラベル '{label}' に一致するクラスがありません")
-            self.queue.put(("status", "音声を抽出中..."))
-            waveform = extract_waveform(path)
-            self.queue.put(("status", f"解析中... (対象クラス {len(indices)} 件)"))
-            scores = self.model.scores(
-                waveform, progress=lambda r: self.queue.put(("progress", r))
+                raise RuntimeError(f"ラベル '{self._label}' に一致するクラスがありません")
+            self.status.emit("音声を抽出中...")
+            waveform = extract_waveform(self._path)
+            spec_image, duration = compute_spectrogram(waveform)
+            self.status.emit(f"解析中... (対象クラス {len(indices)} 件)")
+            scores = model.scores(waveform, progress=self.progress.emit)
+            self.finished.emit(
+                {
+                    "segments": detect_segments(scores, indices, threshold=self._threshold),
+                    "frame_scores": combined_frame_scores(scores, indices),
+                    "spec_image": spec_image,
+                    "duration": duration,
+                    "threshold": self._threshold,
+                    "n_classes": len(indices),
+                }
             )
-            segments = detect_segments(scores, indices, threshold=threshold)
-            self.queue.put(("done", segments))
         except Exception as exc:
-            self.queue.put(("error", str(exc)))
+            self.failed.emit(str(exc))
 
-    # --- UI thread ---
 
-    def _poll_queue(self) -> None:
-        try:
-            while True:
-                kind, payload = self.queue.get_nowait()
-                if kind == "status":
-                    self.status_var.set(payload)
-                elif kind == "progress":
-                    self.progress["value"] = payload
-                elif kind == "done":
-                    self._show_results(payload)
-                elif kind == "error":
-                    self.run_btn.config(state=tk.NORMAL)
-                    self.status_var.set("エラーが発生しました")
-                    messagebox.showerror("エラー", payload)
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll_queue)
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Sound Event Extractor")
+        self.resize(920, 800)
+        self.segments = []
+        self.current_label = ""
+        self._worker: AnalysisWorker | None = None
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.player.setAudioOutput(self.audio_output)
+        self._build_ui()
+        self.player.setVideoOutput(self.video)
+        self.player.positionChanged.connect(self._on_position)
+        self.player.durationChanged.connect(self._on_duration)
+        self.player.playbackStateChanged.connect(self._on_playback_state)
 
-    def _show_results(self, segments: list[Segment]) -> None:
-        self.segments = segments
-        for seg in segments:
-            self.tree.insert(
-                "",
-                tk.END,
-                values=(
-                    format_timestamp(seg.start),
-                    format_timestamp(seg.end),
-                    f"{seg.duration:.2f}",
-                    f"{seg.max_score:.3f}",
-                    f"{seg.mean_score:.3f}",
-                ),
-            )
-        self.progress["value"] = 1.0
-        self.run_btn.config(state=tk.NORMAL)
-        self.save_btn.config(state=tk.NORMAL if segments else tk.DISABLED)
-        self.status_var.set(f"検出区間: {len(segments)} 件")
+    def _build_ui(self) -> None:
+        central = QWidget()
+        layout = QVBoxLayout(central)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("動画ファイル:"))
+        self.path_edit = QLineEdit()
+        row.addWidget(self.path_edit, stretch=1)
+        browse_btn = QPushButton("参照...")
+        browse_btn.clicked.connect(self._browse)
+        row.addWidget(browse_btn)
+        layout.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("ラベル:"))
+        self.label_combo = QComboBox()
+        self.label_combo.setEditable(True)
+        self.label_combo.addItems(SUGGESTED_LABELS)
+        row.addWidget(self.label_combo)
+        row.addWidget(QLabel("しきい値:"))
+        self.threshold_spin = QDoubleSpinBox()
+        self.threshold_spin.setRange(0.05, 0.95)
+        self.threshold_spin.setSingleStep(0.05)
+        self.threshold_spin.setValue(0.30)
+        row.addWidget(self.threshold_spin)
+        self.run_btn = QPushButton("解析開始")
+        self.run_btn.clicked.connect(self._start_analysis)
+        row.addWidget(self.run_btn)
+        self.save_btn = QPushButton("CSV 保存")
+        self.save_btn.setEnabled(False)
+        self.save_btn.clicked.connect(self._save_csv)
+        row.addWidget(self.save_btn)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setMaximumWidth(140)
+        row.addWidget(self.progress_bar)
+        self.status_label = QLabel("動画とラベルを選んで「解析開始」を押してください")
+        row.addWidget(self.status_label, stretch=1)
+        layout.addLayout(row)
+
+        # --- playback area ---
+        self.video = QVideoWidget()
+        self.video.setMinimumHeight(280)
+        layout.addWidget(self.video, stretch=1)
+
+        row = QHBoxLayout()
+        self.play_btn = QPushButton("▶ 再生")
+        self.play_btn.setEnabled(False)
+        self.play_btn.clicked.connect(self._toggle_play)
+        row.addWidget(self.play_btn)
+        self.position_slider = QSlider(Qt.Orientation.Horizontal)
+        self.position_slider.sliderMoved.connect(self.player.setPosition)
+        row.addWidget(self.position_slider, stretch=1)
+        self.time_label = QLabel("0:00:00.000 / 0:00:00.000")
+        row.addWidget(self.time_label)
+        self.score_label = QLabel("スコア -")
+        self.score_label.setMinimumWidth(90)
+        row.addWidget(self.score_label)
+        layout.addLayout(row)
+
+        self.spectrogram = SpectrogramView()
+        self.spectrogram.seekRequested.connect(self._seek)
+        layout.addWidget(self.spectrogram)
+        self.timeline = ScoreTimeline()
+        self.timeline.seekRequested.connect(self._seek)
+        layout.addWidget(self.timeline)
+
+        self.table = QTableWidget(0, len(TABLE_HEADERS))
+        self.table.setHorizontalHeaderLabels(TABLE_HEADERS)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.cellDoubleClicked.connect(self._on_row_activated)
+        self.table.setMinimumHeight(140)
+        layout.addWidget(self.table)
+
+        self.setCentralWidget(central)
+
+    # --- playback ---
+
+    def _load_media(self, path: str) -> None:
+        self.player.setSource(QUrl.fromLocalFile(path))
+        self.play_btn.setEnabled(True)
+
+    def _toggle_play(self) -> None:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
+
+    def _on_playback_state(self, state) -> None:
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.play_btn.setText("⏸ 一時停止" if playing else "▶ 再生")
+
+    def _on_duration(self, duration_ms: int) -> None:
+        self.position_slider.setRange(0, duration_ms)
+        self.spectrogram.set_duration(duration_ms / 1000)
+        self.timeline.set_duration(duration_ms / 1000)
+
+    def _on_position(self, position_ms: int) -> None:
+        if not self.position_slider.isSliderDown():
+            self.position_slider.blockSignals(True)
+            self.position_slider.setValue(position_ms)
+            self.position_slider.blockSignals(False)
+        seconds = position_ms / 1000
+        self.spectrogram.set_position(seconds)
+        self.timeline.set_position(seconds)
+        total = max(self.player.duration(), 0) / 1000
+        self.time_label.setText(f"{format_timestamp(seconds)} / {format_timestamp(total)}")
+        score = self.timeline.score_at(seconds)
+        self.score_label.setText("スコア -" if score is None else f"スコア {score:.3f}")
+
+    def _seek(self, seconds: float) -> None:
+        self.player.setPosition(max(0, int(seconds * 1000)))
+
+    def _on_row_activated(self, row: int, _column: int) -> None:
+        if 0 <= row < len(self.segments):
+            self._seek(max(self.segments[row].start - 0.5, 0.0))
+
+    # --- analysis ---
+
+    def _browse(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "動画ファイルを選択", "", MEDIA_FILTER)
+        if path:
+            self.path_edit.setText(path)
+            self._load_media(path)
+            self.status_label.setText("「解析開始」で検出、再生ボタンで内容を確認できます")
+
+    def _start_analysis(self) -> None:
+        path = self.path_edit.text().strip()
+        label = self.label_combo.currentText().strip()
+        if not path or not label:
+            QMessageBox.warning(self, "入力不足", "動画ファイルとラベルを指定してください")
+            return
+        if self.player.source().isEmpty():
+            self._load_media(path)
+        self.run_btn.setEnabled(False)
+        self.save_btn.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.table.setRowCount(0)
+        self.current_label = label
+        worker = AnalysisWorker(path, label, self.threshold_spin.value())
+        worker.status.connect(self.status_label.setText)
+        worker.progress.connect(lambda ratio: self.progress_bar.setValue(int(ratio * 100)))
+        worker.failed.connect(self._on_failed)
+        worker.finished.connect(self._on_finished)
+        self._worker = worker  # keep a reference while the thread runs
+        threading.Thread(target=worker.run, daemon=True).start()
+
+    def _on_failed(self, message: str) -> None:
+        self.run_btn.setEnabled(True)
+        self.status_label.setText("エラーが発生しました")
+        QMessageBox.critical(self, "エラー", message)
+
+    def _on_finished(self, result: dict) -> None:
+        self.segments = result["segments"]
+        self.spectrogram.set_data(result["spec_image"], result["duration"])
+        self.timeline.set_data(
+            result["frame_scores"], FRAME_HOP_SEC, result["threshold"], result["duration"]
+        )
+        self.table.setRowCount(len(self.segments))
+        for i, seg in enumerate(self.segments):
+            values = [
+                format_timestamp(seg.start),
+                format_timestamp(seg.end),
+                f"{seg.duration:.2f}",
+                f"{seg.max_score:.3f}",
+                f"{seg.mean_score:.3f}",
+            ]
+            for col, value in enumerate(values):
+                self.table.setItem(i, col, QTableWidgetItem(value))
+        self.progress_bar.setValue(100)
+        self.run_btn.setEnabled(True)
+        self.save_btn.setEnabled(bool(self.segments))
+        self.status_label.setText(
+            f"検出区間: {len(self.segments)} 件(対象クラス {result['n_classes']} 件)"
+            " — 行をダブルクリックでその位置へジャンプ"
+        )
 
     def _save_csv(self) -> None:
-        path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")],
-            initialfile="events.csv",
-        )
-        if not path:
-            return
-        write_csv(path, self.current_label, self.segments)
-        self.status_var.set(f"保存しました: {path}")
+        path, _ = QFileDialog.getSaveFileName(self, "CSV を保存", "events.csv", "CSV (*.csv)")
+        if path:
+            write_csv(path, self.current_label, self.segments)
+            self.status_label.setText(f"保存しました: {path}")
 
 
 def main() -> None:
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    app = QApplication([])
+    window = MainWindow()
+    window.show()
+    raise SystemExit(app.exec())
 
 
 if __name__ == "__main__":
