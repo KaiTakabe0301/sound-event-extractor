@@ -231,6 +231,16 @@ class MainWindow(QMainWindow):
         self.score_label = QLabel("スコア -")
         self.score_label.setMinimumWidth(90)
         row.addWidget(self.score_label)
+        row.addWidget(QLabel("音量:"))
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.setFixedWidth(100)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        row.addWidget(self.volume_slider)
+        self.volume_label = QLabel("100%")
+        self.volume_label.setMinimumWidth(40)
+        row.addWidget(self.volume_label)
         layout.addLayout(row)
 
         # instantaneous view of the moment being played
@@ -292,6 +302,11 @@ class MainWindow(QMainWindow):
         if not self._analysis_running and not self._analysis_done:
             self._start_analysis(auto=True)  # live-fill the strips during playback
         self.player.play()
+
+    def _on_volume_changed(self, value: int) -> None:
+        # quadratic curve: finer control at low volumes, closer to perceived loudness
+        self.audio_output.setVolume((value / 100) ** 2)
+        self.volume_label.setText(f"{value}%")
 
     def _on_playback_state(self, state) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
