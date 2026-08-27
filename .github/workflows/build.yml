@@ -28,7 +28,34 @@ jobs:
           --collect-all tensorflow --collect-all tensorflow_hub
           --collect-all tf_keras --collect-all imageio_ffmpeg
           packaging/entry_gui.py
+      # zip on each runner: upload/download-artifact strips POSIX permissions,
+      # which would break the macOS app; ditto preserves them inside the zip
+      - name: Archive app (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/SoundEventExtractor.app SoundEventExtractor-macos.zip
+      - name: Archive app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/SoundEventExtractor -DestinationPath SoundEventExtractor-windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: SoundEventExtractor-${{ matrix.os }}
-          path: dist/
+          path: SoundEventExtractor-*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" artifacts/*.zip
+          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
