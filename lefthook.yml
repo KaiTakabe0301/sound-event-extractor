@@ -1,0 +1,7 @@
+# Git hooks managed by lefthook (https://lefthook.dev/)
+# Enable with: lefthook install  (done by `mise run setup`)
+
+pre-commit:
+  commands:
+    secrets-scan:
+      run: betterleaks git --pre-commit --staged --redact --verbose

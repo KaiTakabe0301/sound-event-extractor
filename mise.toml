@@ -1,13 +1,14 @@
 [tools]
 python = "3.12"
 uv = "latest"
-gitleaks = "latest"
+betterleaks = "latest"
+lefthook = "latest"
 
 [tasks.setup]
-description = "Install dependencies and enable the gitleaks pre-commit hook"
+description = "Install dependencies and enable the lefthook git hooks (secrets scan)"
 run = [
   "uv sync",
-  "git config core.hooksPath .githooks",
+  "lefthook install",
 ]
 
 [tasks.cli]
@@ -28,4 +29,4 @@ run = "uv run pyinstaller --noconfirm --clean --windowed --name SoundEventExtrac
 
 [tasks.scan]
 description = "Scan the full git history for leaked secrets"
-run = "gitleaks git --redact --verbose"
+run = "betterleaks git --redact --verbose"
