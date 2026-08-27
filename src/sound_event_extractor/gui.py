@@ -149,7 +149,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Sound Event Extractor")
-        self.resize(940, 920)
+        self.resize(940, 960)
         self.segments = []
         self.current_label = ""
         self._worker: AnalysisWorker | None = None
