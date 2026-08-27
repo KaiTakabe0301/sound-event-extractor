@@ -11,7 +11,7 @@ Google の学習済み音響イベント分類モデル
 ## 必要環境
 
 - macOS(Apple Silicon で動作確認)
-- [mise](https://mise.jdx.dev/) … Python / uv / Gitleaks の導入に使用
+- [mise](https://mise.jdx.dev/) … Python / uv / BetterLeaks / lefthook の導入に使用
 - ネットワーク接続(初回のみ。YAMNet モデル約 20MB をダウンロードし
   `~/.cache/sound-event-extractor/tfhub` にキャッシュ)
 
@@ -23,7 +23,7 @@ ffmpeg はシステムに無くても、依存パッケージ `imageio-ffmpeg` �
 ```sh
 mise trust        # 初回のみ: このリポジトリの mise.toml を信頼
 mise install      # Python 3.12 / uv / gitleaks を導入
-mise run setup    # uv sync + gitleaks pre-commit フックの有効化
+mise run setup    # uv sync + lefthook の git フック有効化(シークレット検査)
 ```
 
 ## 使い方
@@ -119,18 +119,19 @@ label,start_seconds,end_seconds,duration_seconds,start_time,end_time,max_score,m
 - `start_time` / `end_time` … `時:分:秒.ミリ秒` 表記
 - `max_score` / `mean_score` … 区間内フレームスコアの最大値・平均値(0〜1)
 
-## シークレット流出防止(Gitleaks)
+## シークレット流出防止(BetterLeaks + lefthook)
 
-mise 経由で [Gitleaks](https://github.com/gitleaks/gitleaks) を導入し、
-`mise run setup` で pre-commit フック(`.githooks/pre-commit`)を有効化します。
-コミット時にステージ済み差分をスキャンし、API キー等の混入を検出すると
-コミットを中断します。履歴全体の手動スキャンは:
+mise 経由で [BetterLeaks](https://github.com/betterleaks/betterleaks) と
+[lefthook](https://lefthook.dev/) を導入し、`mise run setup` で
+git フック(`lefthook.yml` の pre-commit)を有効化します。コミット時に
+ステージ済み差分をスキャンし、API キー等の混入を検出するとコミットを
+中断します。履歴全体の手動スキャンは:
 
 ```sh
 mise run scan
 ```
 
-誤検知は `.gitleaks.toml` の allowlist に追記して除外できます。
+誤検知は `.betterleaks.toml` の allowlist に追記して除外できます。
 
 ## Windows 対応と配布用ビルド
 
