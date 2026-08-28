@@ -190,6 +190,15 @@ src/sound_event_extractor/
   spectrogram.py # 表示用 STFT スペクトログラム計算(numpy のみ)
 ```
 
+## ライセンス
+
+本プロジェクトのソースコードは [MIT License](LICENSE) です。
+配布用アプリ(Release の zip)には Qt / PySide6(LGPL-3.0)、
+ffmpeg(GPL ビルド)、TensorFlow(Apache-2.0)などのサードパーティ
+コンポーネントが同梱されます。各コンポーネントのライセンスと入手元は
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください
+(同ファイルは Release zip にも同梱されます)。
+
 ## 制約・既知の注意点
 
 - 検出できるのは AudioSet の 521 クラスに関連する音のみ(任意の自由文
