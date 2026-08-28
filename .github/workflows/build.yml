@@ -32,11 +32,17 @@ jobs:
       # which would break the macOS app; ditto preserves them inside the zip
       - name: Archive app (macOS)
         if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent dist/SoundEventExtractor.app SoundEventExtractor-macos.zip
+        run: |
+          mkdir bundle
+          cp -R dist/SoundEventExtractor.app bundle/
+          cp LICENSE THIRD_PARTY_NOTICES.md bundle/
+          ditto -c -k --sequesterRsrc bundle SoundEventExtractor-macos.zip
       - name: Archive app (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/SoundEventExtractor -DestinationPath SoundEventExtractor-windows.zip
+        run: |
+          Copy-Item LICENSE,THIRD_PARTY_NOTICES.md dist/SoundEventExtractor/
+          Compress-Archive -Path dist/SoundEventExtractor -DestinationPath SoundEventExtractor-windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: SoundEventExtractor-${{ matrix.os }}
