@@ -69,3 +69,19 @@ def test_instant_score_view_streaming(app) -> None:
     view.grab()  # "not yet analyzed" paint path
     view.clear()
     assert view._index == -1
+
+
+def test_marks_are_painted(app) -> None:
+    strip = ScoreTimeline()
+    strip.begin_stream(0.48, 0.3, 10.0)
+    strip.append_scores(np.array([0.1, 0.2], dtype=np.float32))
+    strip.set_marks(2.0, None)
+    strip.grab()
+    strip.set_marks(2.0, 6.5)
+    strip.grab()
+    spec = SpectrogramView()
+    spec.set_data(np.zeros((16, 8), dtype=np.uint8), 10.0)
+    spec.set_marks(1.0, 3.0)
+    spec.grab()
+    spec.set_marks(None, None)
+    spec.grab()

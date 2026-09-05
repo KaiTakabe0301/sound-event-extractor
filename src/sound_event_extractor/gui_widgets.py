@@ -13,6 +13,8 @@ PLAYHEAD_COLOR = QColor("#e53935")
 SCORE_COLOR = QColor("#4caf50")
 THRESHOLD_COLOR = QColor("#ff9800")
 AXIS_COLOR = QColor("#999999")
+MARK_COLOR = QColor("#ffd54f")
+MARK_FILL_COLOR = QColor(255, 213, 79, 50)
 
 # plot margins reserved for the axes
 MARGIN_LEFT = 58
@@ -47,6 +49,8 @@ class TimeStrip(QWidget):
         self.setFixedHeight(height)
         self._duration = 0.0
         self._position = 0.0
+        self._mark_in: float | None = None
+        self._mark_out: float | None = None
 
     def set_duration(self, seconds: float) -> None:
         if seconds > 0:
@@ -56,6 +60,30 @@ class TimeStrip(QWidget):
     def set_position(self, seconds: float) -> None:
         self._position = seconds
         self.update()
+
+    def set_marks(self, mark_in: float | None, mark_out: float | None) -> None:
+        """Show the in/out points of the segment being annotated by hand."""
+        self._mark_in = mark_in
+        self._mark_out = mark_out
+        self.update()
+
+    def _time_to_x(self, rect: QRect, seconds: float) -> int:
+        return rect.x() + int(seconds / self._duration * rect.width())
+
+    def _draw_marks(self, painter: QPainter) -> None:
+        if self._duration <= 0 or (self._mark_in is None and self._mark_out is None):
+            return
+        rect = self._plot_rect()
+        if self._mark_in is not None and self._mark_out is not None:
+            left = self._time_to_x(rect, min(self._mark_in, self._mark_out))
+            right = self._time_to_x(rect, max(self._mark_in, self._mark_out))
+            span = QRect(left, rect.top(), max(right - left, 1), rect.height())
+            painter.fillRect(span, MARK_FILL_COLOR)
+        painter.setPen(QPen(MARK_COLOR, 1, Qt.PenStyle.DashLine))
+        for mark in (self._mark_in, self._mark_out):
+            if mark is not None:
+                x = self._time_to_x(rect, mark)
+                painter.drawLine(x, rect.top(), x, rect.bottom())
 
     def _plot_rect(self) -> QRect:
         return QRect(
@@ -155,6 +183,7 @@ class SpectrogramView(TimeStrip):
                 "周波数 (kHz)",
                 [(0.0, "8"), (0.25, "6"), (0.5, "4"), (0.75, "2"), (1.0, "0")],
             )
+        self._draw_marks(painter)
         self._draw_playhead(painter)
         painter.end()
 
@@ -241,5 +270,6 @@ class ScoreTimeline(TimeStrip):
             self._draw_axes(painter, "スコア", [(0.0, "1.0"), (0.5, "0.5"), (1.0, "0.0")])
             painter.setPen(TEXT_COLOR)
             painter.drawText(rect.x() + 6, rect.top() + 12, f"しきい値 {self._threshold:.2f}")
+        self._draw_marks(painter)
         self._draw_playhead(painter)
         painter.end()

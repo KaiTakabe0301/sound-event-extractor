@@ -7,6 +7,7 @@ import threading
 
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -31,7 +32,18 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from .audio import SAMPLE_RATE, extract_waveform
-from .detect import combined_frame_scores, detect_segments, format_timestamp, write_csv
+from .detect import (
+    Segment,
+    combined_frame_scores,
+    detect_segments,
+    format_score,
+    format_timestamp,
+    insert_segment,
+    make_manual_segment,
+    merge_results,
+    read_csv,
+    write_csv,
+)
 from .gui_instant import InstantScoreView, InstantSpectrumView
 from .gui_widgets import ScoreTimeline, SpectrogramView
 from .labels import SUGGESTED_LABELS, match_classes
@@ -39,7 +51,10 @@ from .model import FRAME_HOP_SEC
 from .spectrogram import compute_spectrogram
 
 MEDIA_FILTER = "動画/音声 (*.mp4 *.mov *.mkv *.avi *.webm *.m4a *.mp3 *.wav);;すべて (*)"
-TABLE_HEADERS = ["開始", "終了", "長さ(秒)", "最大スコア", "平均スコア"]
+CSV_FILTER = "CSV (*.csv)"
+TABLE_HEADERS = ["開始", "終了", "長さ(秒)", "最大スコア", "平均スコア", "種別"]
+MANUAL_ROW_BRUSH = QBrush(QColor(255, 236, 179))
+MANUAL_ROW_TEXT = QBrush(QColor(60, 40, 0))
 STREAM_FRAMES = 25  # ~12 s per inference chunk: quick first feedback during playback
 
 
@@ -150,8 +165,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Sound Event Extractor")
         self.resize(940, 960)
-        self.segments = []
+        self.segments: list[Segment] = []
         self.current_label = ""
+        self._frame_scores: np.ndarray | None = None
+        self._mark_in: float | None = None
+        self._mark_out: float | None = None
         self._worker: AnalysisWorker | None = None
         self._analysis_running = False
         self._analysis_done = False
@@ -205,6 +223,13 @@ class MainWindow(QMainWindow):
         self.save_btn.setEnabled(False)
         self.save_btn.clicked.connect(self._save_csv)
         row.addWidget(self.save_btn)
+        self.import_btn = QPushButton("CSV 読込")
+        self.import_btn.setToolTip(
+            "保存した CSV を読み込み、手動で追加した区間を結果に取り込みます\n"
+            "(解析結果が無いときは自動検出の行も読み込みます)"
+        )
+        self.import_btn.clicked.connect(self._import_csv)
+        row.addWidget(self.import_btn)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setMaximumWidth(140)
@@ -243,6 +268,38 @@ class MainWindow(QMainWindow):
         row.addWidget(self.volume_label)
         layout.addLayout(row)
 
+        # manual annotation: mark in/out at the playhead, then append as a segment
+        row = QHBoxLayout()
+        row.addWidget(QLabel("手動追加:"))
+        self.mark_in_btn = QPushButton("始点 [I]")
+        self.mark_in_btn.setShortcut("I")
+        self.mark_in_btn.setToolTip("現在の再生位置を区間の始点にする (I キー)")
+        self.mark_in_btn.setEnabled(False)
+        self.mark_in_btn.clicked.connect(self._set_mark_in)
+        row.addWidget(self.mark_in_btn)
+        self.mark_out_btn = QPushButton("終点 [O]")
+        self.mark_out_btn.setShortcut("O")
+        self.mark_out_btn.setToolTip("現在の再生位置を区間の終点にする (O キー)")
+        self.mark_out_btn.setEnabled(False)
+        self.mark_out_btn.clicked.connect(self._set_mark_out)
+        row.addWidget(self.mark_out_btn)
+        self.marks_label = QLabel()
+        self.marks_label.setMinimumWidth(260)
+        row.addWidget(self.marks_label)
+        self.add_segment_btn = QPushButton("区間を追加 [A]")
+        self.add_segment_btn.setShortcut("A")
+        self.add_segment_btn.setToolTip("始点〜終点を手動区間として結果に追記する (A キー)")
+        self.add_segment_btn.setEnabled(False)
+        self.add_segment_btn.clicked.connect(self._add_manual_segment)
+        row.addWidget(self.add_segment_btn)
+        self.delete_btn = QPushButton("選択行を削除")
+        self.delete_btn.setToolTip("手動で追加した行のみ削除できます")
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.clicked.connect(self._delete_selected_segment)
+        row.addWidget(self.delete_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+
         # instantaneous view of the moment being played
         row = QHBoxLayout()
         self.instant_spectrum = InstantSpectrumView()
@@ -263,16 +320,20 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.cellDoubleClicked.connect(self._on_row_activated)
+        self.table.itemSelectionChanged.connect(self._update_delete_button)
         self.table.setMinimumHeight(140)
         layout.addWidget(self.table)
 
         self.setCentralWidget(central)
+        self._update_marks()
 
     # --- playback ---
 
     def _load_media(self, path: str) -> None:
         self.player.setSource(QUrl.fromLocalFile(path))
         self.play_btn.setEnabled(True)
+        self.mark_in_btn.setEnabled(True)
+        self.mark_out_btn.setEnabled(True)
         # decode the audio up front so the instant spectrum works without analysis
         self._start_extraction(path)
 
@@ -347,9 +408,10 @@ class MainWindow(QMainWindow):
             self.path_edit.setText(path)
             self._load_media(path)
             self._analysis_done = False
-            self.segments = []
-            self.table.setRowCount(0)
-            self.save_btn.setEnabled(False)
+            self._frame_scores = None
+            self._mark_in = self._mark_out = None
+            self._update_marks()
+            self._set_segments([])
             self.spectrogram.clear()
             self.timeline.clear()
             self.instant_score.clear()
@@ -367,9 +429,9 @@ class MainWindow(QMainWindow):
         if self.player.source().isEmpty():
             self._load_media(path)
         self.run_btn.setEnabled(False)
-        self.save_btn.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.table.setRowCount(0)
+        self._frame_scores = None
+        self._set_segments([seg for seg in self.segments if seg.is_manual])
         self.timeline.clear()
         self.instant_score.clear()
         self.current_label = label
@@ -421,34 +483,132 @@ class MainWindow(QMainWindow):
     def _on_finished(self, result: dict) -> None:
         self._analysis_running = False
         self._analysis_done = True
-        self.segments = result["segments"]
+        self._frame_scores = result["frame_scores"]
         self.spectrogram.set_data(result["spec_image"], result["duration"])
         self.timeline.set_data(
             result["frame_scores"], FRAME_HOP_SEC, result["threshold"], result["duration"]
         )
-        self.table.setRowCount(len(self.segments))
-        for i, seg in enumerate(self.segments):
+        self._set_segments(merge_results(result["segments"], self.segments))
+        self.progress_bar.setValue(100)
+        self.run_btn.setEnabled(True)
+        n_manual = sum(seg.is_manual for seg in self.segments)
+        self.status_label.setText(
+            f"検出区間: {len(self.segments) - n_manual} 件(対象クラス {result['n_classes']} 件)"
+            + (f" + 手動 {n_manual} 件" if n_manual else "")
+            + " — 行をダブルクリックでその位置へジャンプ"
+        )
+
+    # --- results table / manual annotation ---
+
+    def _set_segments(self, segments: list[Segment]) -> None:
+        self.segments = segments
+        self.table.setRowCount(len(segments))
+        for i, seg in enumerate(segments):
             values = [
                 format_timestamp(seg.start),
                 format_timestamp(seg.end),
                 f"{seg.duration:.2f}",
-                f"{seg.max_score:.3f}",
-                f"{seg.mean_score:.3f}",
+                format_score(seg.max_score) or "-",
+                format_score(seg.mean_score) or "-",
+                "手動" if seg.is_manual else "自動",
             ]
             for col, value in enumerate(values):
-                self.table.setItem(i, col, QTableWidgetItem(value))
-        self.progress_bar.setValue(100)
-        self.run_btn.setEnabled(True)
-        self.save_btn.setEnabled(bool(self.segments))
+                item = QTableWidgetItem(value)
+                if seg.is_manual:
+                    item.setBackground(MANUAL_ROW_BRUSH)
+                    item.setForeground(MANUAL_ROW_TEXT)
+                self.table.setItem(i, col, item)
+        self.save_btn.setEnabled(bool(segments))
+        self._update_delete_button()
+
+    def _selected_row(self) -> int | None:
+        rows = self.table.selectionModel().selectedRows()
+        if len(rows) == 1 and rows[0].row() < len(self.segments):
+            return rows[0].row()
+        return None
+
+    def _update_delete_button(self) -> None:
+        row = self._selected_row()
+        self.delete_btn.setEnabled(row is not None and self.segments[row].is_manual)
+
+    def _update_marks(self) -> None:
+        def fmt(mark: float | None) -> str:
+            return "-" if mark is None else format_timestamp(mark)
+
+        self.marks_label.setText(f"始点 {fmt(self._mark_in)}  →  終点 {fmt(self._mark_out)}")
+        self.add_segment_btn.setEnabled(
+            self._mark_in is not None
+            and self._mark_out is not None
+            and self._mark_out > self._mark_in
+        )
+        self.spectrogram.set_marks(self._mark_in, self._mark_out)
+        self.timeline.set_marks(self._mark_in, self._mark_out)
+
+    def _set_mark_in(self) -> None:
+        self._mark_in = self.player.position() / 1000
+        self._update_marks()
+
+    def _set_mark_out(self) -> None:
+        self._mark_out = self.player.position() / 1000
+        self._update_marks()
+
+    def _add_manual_segment(self) -> None:
+        if self._mark_in is None or self._mark_out is None or self._mark_out <= self._mark_in:
+            return
+        segment = make_manual_segment(self._mark_in, self._mark_out, self._frame_scores)
+        self._set_segments(insert_segment(self.segments, segment))
+        row = self.segments.index(segment)
+        self.table.selectRow(row)
+        self.table.scrollToItem(self.table.item(row, 0))
         self.status_label.setText(
-            f"検出区間: {len(self.segments)} 件(対象クラス {result['n_classes']} 件)"
-            " — 行をダブルクリックでその位置へジャンプ"
+            f"手動区間を追加: {format_timestamp(segment.start)} - {format_timestamp(segment.end)}"
+        )
+        self._mark_in = self._mark_out = None
+        self._update_marks()
+
+    def _delete_selected_segment(self) -> None:
+        row = self._selected_row()
+        if row is None or not self.segments[row].is_manual:
+            return
+        removed = self.segments[row]
+        self._set_segments(self.segments[:row] + self.segments[row + 1 :])
+        self.status_label.setText(
+            f"手動区間を削除: {format_timestamp(removed.start)} - {format_timestamp(removed.end)}"
+        )
+
+    def _import_csv(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "CSV を読み込む", "", CSV_FILTER)
+        if not path:
+            return
+        try:
+            label, imported = read_csv(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "CSV 読込エラー", str(exc))
+            return
+        has_auto = any(not seg.is_manual for seg in self.segments)
+        merged = list(self.segments)
+        n_added = 0
+        for seg in imported:
+            if not seg.is_manual and has_auto:
+                continue  # keep the current analysis; only bring in human annotations
+            before = len(merged)
+            merged = insert_segment(merged, seg)
+            n_added += len(merged) - before
+        self._set_segments(merged)
+        if label and not self.current_label:
+            self.current_label = label
+        n_manual = sum(seg.is_manual for seg in imported)
+        self.status_label.setText(
+            f"CSV を読み込みました: {n_added} 件追加(手動 {n_manual} 件"
+            + ("、自動検出行はスキップ" if has_auto else "")
+            + ")"
         )
 
     def _save_csv(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "CSV を保存", "events.csv", "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, "CSV を保存", "events.csv", CSV_FILTER)
         if path:
-            write_csv(path, self.current_label, self.segments)
+            label = self.current_label or self.label_combo.currentText().strip()
+            write_csv(path, label, self.segments)
             self.status_label.setText(f"保存しました: {path}")
 
 

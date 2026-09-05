@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import csv
+import math
 from dataclasses import dataclass
 
 import numpy as np
 
 from .model import FRAME_HOP_SEC, FRAME_WIN_SEC
+
+SOURCE_AUTO = "auto"
+SOURCE_MANUAL = "manual"
 
 CSV_HEADER = [
     "label",
@@ -18,6 +22,7 @@ CSV_HEADER = [
     "end_time",
     "max_score",
     "mean_score",
+    "source",
 ]
 
 
@@ -25,12 +30,64 @@ CSV_HEADER = [
 class Segment:
     start: float
     end: float
-    max_score: float
+    max_score: float  # NaN when no frame scores are available (manual, unanalyzed)
     mean_score: float
+    source: str = SOURCE_AUTO
 
     @property
     def duration(self) -> float:
         return self.end - self.start
+
+    @property
+    def is_manual(self) -> bool:
+        return self.source == SOURCE_MANUAL
+
+
+def format_score(score: float) -> str:
+    return "" if math.isnan(score) else f"{score:.3f}"
+
+
+def _parse_score(text: str) -> float:
+    text = text.strip()
+    return float(text) if text else math.nan
+
+
+def segment_scores(
+    frame_scores: np.ndarray | None, start: float, end: float
+) -> tuple[float, float]:
+    """(max, mean) of the frames overlapping [start, end]; NaN when none are available."""
+    if frame_scores is None or frame_scores.size == 0:
+        return math.nan, math.nan
+    first = max(int(math.ceil((start - FRAME_WIN_SEC) / FRAME_HOP_SEC)), 0)
+    last = min(int(end / FRAME_HOP_SEC), frame_scores.size - 1)
+    if first > last:
+        return math.nan, math.nan
+    window = frame_scores[first : last + 1]
+    return float(window.max()), float(window.mean())
+
+
+def make_manual_segment(
+    start: float, end: float, frame_scores: np.ndarray | None = None
+) -> Segment:
+    max_score, mean_score = segment_scores(frame_scores, start, end)
+    return Segment(start, end, max_score, mean_score, source=SOURCE_MANUAL)
+
+
+def insert_segment(segments: list[Segment], segment: Segment) -> list[Segment]:
+    """Return a new chronologically ordered list; identical start/end is not duplicated."""
+    for existing in segments:
+        if existing.start == segment.start and existing.end == segment.end:
+            return list(segments)
+    return sorted([*segments, segment], key=lambda s: (s.start, s.end))
+
+
+def merge_results(auto_segments: list[Segment], previous: list[Segment]) -> list[Segment]:
+    """Combine fresh analysis results with the manual segments kept from `previous`."""
+    merged = list(auto_segments)
+    for seg in previous:
+        if seg.is_manual:
+            merged = insert_segment(merged, seg)
+    return merged
 
 
 def format_timestamp(seconds: float) -> str:
@@ -109,10 +166,42 @@ def write_csv(path: str, label: str, segments: list[Segment]) -> None:
                     f"{seg.duration:.3f}",
                     format_timestamp(seg.start),
                     format_timestamp(seg.end),
-                    f"{seg.max_score:.3f}",
-                    f"{seg.mean_score:.3f}",
+                    format_score(seg.max_score),
+                    format_score(seg.mean_score),
+                    seg.source,
                 ]
             )
+
+
+def read_csv(path: str) -> tuple[str, list[Segment]]:
+    """Read a CSV written by `write_csv` back into (label, segments).
+
+    Files from older versions without a `source` column are treated as automatic.
+    """
+    label = ""
+    segments: list[Segment] = []
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        fields = reader.fieldnames or []
+        for column in ("start_seconds", "end_seconds"):
+            if column not in fields:
+                raise ValueError(f"CSV に '{column}' 列がありません: {path}")
+        for row in reader:
+            label = label or (row.get("label") or "").strip()
+            source = (row.get("source") or SOURCE_AUTO).strip().lower()
+            if source not in (SOURCE_AUTO, SOURCE_MANUAL):
+                raise ValueError(f"source 列の値が不正です: {source!r}")
+            segments.append(
+                Segment(
+                    start=float(row["start_seconds"]),
+                    end=float(row["end_seconds"]),
+                    max_score=_parse_score(row.get("max_score") or ""),
+                    mean_score=_parse_score(row.get("mean_score") or ""),
+                    source=source,
+                )
+            )
+    segments.sort(key=lambda s: (s.start, s.end))
+    return label, segments
 
 
 DEBUG_TOP_N = 5
