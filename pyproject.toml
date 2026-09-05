@@ -1,6 +1,6 @@
 [project]
 name = "sound-event-extractor"
-version = "0.0.1"
+version = "0.1.0"
 description = "Detect labeled sound events (e.g. dog barks) in video files and export their time segments as CSV"
 readme = "README.md"
 license = "MIT"
