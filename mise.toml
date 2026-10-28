@@ -1,8 +1,9 @@
 [tools]
-python = "3.12"
-uv = "latest"
-betterleaks = "latest"
-lefthook = "latest"
+python = "3.12.16"
+uv = "0.13.6"
+go = "1.27.3"
+"go:github.com/betterleaks/betterleaks" = "1.9.0"
+"go:github.com/evilmartians/lefthook/v2" = "2.2.2"
 
 [tasks.setup]
 description = "Install dependencies and enable the lefthook git hooks (secrets scan)"
