@@ -1,6 +1,6 @@
 [tools]
-python = "3.12"
-uv = "latest"
+python = "3.12.16"
+uv = "0.13.6"
 betterleaks = "latest"
 lefthook = "latest"
 
